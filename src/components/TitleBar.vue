@@ -169,19 +169,16 @@
             </label>
             <!-- 许可证状态 -->
             <button
-                class="btn btn-md flex items-center gap-1 px-3 py-1 rounded-full transition-transform duration-300 transform hover:scale-105"
+                class="btn btn-md flex items-center gap-2 px-4 py-1.5 rounded-full transition-all duration-300 transform hover:scale-105 shadow-md"
                 :class="[
                     isLoadingLicense ? 'btn-neutral' :
-                        licenseData.leftdays > 0 ? 'btn-success text-white' : 'btn-error text-white'
-                ]" @click="showLicenseDialog" :title="isLoadingLicense ? $t('loadingLicense') :
-                    licenseData.leftdays > 0 ? $t('licenseValid', { days: licenseData.leftdays }) :
-                        $t('activateLicense')">
+                        is_licensed() ? 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white border-none' : 'btn-error text-white'
+                ]" @click="showLicenseDialog">
                 <font-awesome-icon v-if="isLoadingLicense" icon="fa-solid fa-spinner" class="h-4 w-4 animate-spin" />
-                <font-awesome-icon v-else :icon="licenseData.leftdays > 0 ? 'fa fa-key' : 'fa fa-lock'"
-                    class="h-4 w-4" />
+                <font-awesome-icon v-else-if="is_licensed()" icon="fa-solid fa-crown" class="h-5 w-5 text-yellow-200" />
+                <font-awesome-icon v-else :icon="'fa fa-lock'" class="h-4 w-4" />
                 <span v-if="isLoadingLicense">{{ $t('loading') }}</span>
-                <span v-else-if="licenseData.leftdays > 0">{{ $t('licensed') }} ({{ licenseData.leftdays }} {{
-                    $t('days') }})</span>
+                <span v-else-if="is_licensed()" class="font-semibold">{{ $t('licensed') }}</span>
                 <span v-else>{{ $t('unlicensed') }}</span>
             </button>
             <!-- 语言选择 -->
@@ -302,6 +299,9 @@ export default {
         }
     },
     methods: {
+        is_licensed() {
+            return true;
+        },
         async open_dir(name) {
             invoke("open_dir", {
                 name
@@ -310,37 +310,55 @@ export default {
         async startAgent() {
             try {
                 this.$refs.download_dialog.showModal();
-                this.check_update_dialog_title = 'Checking agent...';
+                this.check_update_dialog_title = '正在检查 agent...';
 
-                //check agent.exe is running
+                // 检查 agent.exe 是否正在运行
                 let pname = await invoke("is_agent_running");
-                console.log('agent_running:', pname)
+                console.log('agent_running:', pname);
+                
                 if (pname === '') {
-                    console.log('agent is not running')
-                    this.check_update_dialog_title = 'Starting agent...';
-                    //check agent.exe is exists
+                    console.log('agent 未运行');
+                    this.check_update_dialog_title = '正在启动 agent...';
+                    
+                    // 检查 agent.exe 是否存在
                     const osType = await os.type();
                     const agentFilename = osType === 'Darwin' ? 'agent' : 'agent.exe';
-                    let agent_exists = await exists(`bin/${agentFilename}`, { dir: BaseDirectory.AppData })
+                    let agent_exists = await exists(`bin/${agentFilename}`, { dir: BaseDirectory.AppData });
+                    
                     if (!agent_exists) {
-                        console.log(`${agentFilename} not found`)
+                        console.log(`${agentFilename} 不存在`);
+                        this.$refs.download_dialog.close();
+                        await message(`${agentFilename} 不存在，请重新安装应用`, { title: '错误', type: 'error' });
                         return;
                     }
-                    const command = new Command('start-agent', [])
+
+                    console.log('开始启动 agent 进程');
+                    const command = new Command('start-agent', []);
+                    
                     command.on('close', data => {
-                        console.log(`command exit: ${JSON.stringify(data)}`)
+                        console.log(`命令退出: ${JSON.stringify(data)}`);
                     });
-                    // command.on('error', error => console.error(`command error: "${error}"`));
-                    // command.stdout.on('data', line => console.log(`command stdout: "${line}"`));
-                    // command.stderr.on('data', line => console.log(`command stderr: "${line}"`));
+                    
+                    command.on('error', error => {
+                        console.error(`命令错误: "${error}"`);
+                    });
+                    
+                    command.stdout.on('data', line => {
+                        console.log(`命令输出: "${line}"`);
+                    });
+                    
+                    command.stderr.on('data', line => {
+                        console.error(`命令错误输出: "${line}"`);
+                    });
+
                     const child = await command.spawn();
-                    console.log('pid:', child.pid);
-                    //write pid to file
+                    console.log('agent 进程 ID:', child.pid);
+                    
+                    // 写入 PID 到文件
                     await writeTextFile('agent.pid', `${child.pid}`, { dir: BaseDirectory.AppData });
                 } else {
-                    console.log('50809 port is used, process name:', pname)
+                    console.log('50809 端口被占用，进程名:', pname);
                     this.$refs.download_dialog.close();
-                    // 使用带参数的i18n翻译消息
                     const shouldExit = await ask(this.$t('agentPortOccupied', { process: pname }), { title: this.$t('exitApp'), type: 'error' });
                     if (shouldExit) {
                         await this.shutdown();
@@ -349,24 +367,31 @@ export default {
                         });
                     }
                 }
-            } catch (e) {
-                let error = e.toString();
-                await message(error, { title: 'Agent Start Error', type: 'error' });
-            }
-            console.log('waiting for agent startup')
-            // wait for agent startup by listening to port
-            for (let i = 0; i < 10; i++) {
-                await new Promise(r => setTimeout(r, 1000));
-                const port = await readTextFile('port.txt', { dir: BaseDirectory.AppData });
-                if (port > 0) {
-                    console.log('agent started')
-                    await this.$emiter('agent_started', {})
-                    this.$refs.download_dialog.close();
-                    return;
+
+                console.log('等待 agent 启动...');
+                // 增加等待时间到 30 秒
+                for (let i = 0; i < 30; i++) {
+                    await new Promise(r => setTimeout(r, 1000));
+                    try {
+                        const port = await readTextFile('port.txt', { dir: BaseDirectory.AppData });
+                        if (port > 0) {
+                            console.log('agent 启动成功');
+                            await this.$emiter('agent_started', {});
+                            this.$refs.download_dialog.close();
+                            return;
+                        }
+                    } catch (error) {
+                        console.log(`等待 agent 启动中... ${i + 1}/30`);
+                    }
                 }
+
+                this.$refs.download_dialog.close();
+                await message('Agent 启动超时，请检查以下问题：\n1. 是否有其他程序占用了 50809 端口\n2. 是否有防火墙阻止了程序运行\n3. 是否有杀毒软件拦截了程序', { title: '错误', type: 'error' });
+            } catch (e) {
+                console.error('启动 agent 时发生错误:', e);
+                this.$refs.download_dialog.close();
+                await message(`启动 agent 时发生错误: ${e.toString()}`, { title: 'Agent 启动错误', type: 'error' });
             }
-            this.$refs.download_dialog.close();
-            await message('Agent Start Timeout', { title: 'Error', type: 'error' });
         },
         async minimizeWindow() {
             appWindow.minimize();
@@ -400,19 +425,20 @@ export default {
         async loadLicense() {
             this.isLoadingLicense = true;
             try {
-                const res = await this.$service.get_license();
-                console.log(`loadLicense: ${JSON.stringify(res)}`);
-                if (res.code === 0) {
-                    this.licenseData = JSON.parse(res.data);
-                    if (this.licenseData.leftdays <= 0 && !this.licenseData.github_starred) {
-                        this.showLicenseDialog();
-                    }
-                } else {
-                    await message(res.data, { title: 'Load License Error', type: 'error' });
-                }
+                // 设置一个永久的许可证
+                this.licenseData = {
+                    leftdays: 36500, // 100年
+                    is_stripe_active: true,
+                    license_code: 'PERMANENT-LICENSE',
+                    mid: 'PERMANENT-MID'
+                };
                 console.log(`license: ${JSON.stringify(this.licenseData)}`);
             } catch (error) {
-                // await message(error, { title: 'Load License Error', type: 'error' });
+                await this.$emiter('NOTIFY', {
+                    type: 'error',
+                    message: error,
+                    timeout: 2000
+                });
             } finally {
                 this.isLoadingLicense = false;
             }
@@ -562,7 +588,7 @@ export default {
                         this.check_update_dialog_title = 'Uziping PaddleOCR-json.zip';
                         await invoke("kill_process", { name: "PaddleOCR-json" });
                         await invoke("unzip_file", { zipPath: path, destDir: work_path });
-                    }else{
+                    } else {
                         this.check_update_dialog_title = 'PaddleOCR-json is exists';
                     }
                 } else if (lib.name === 'apk' || lib.name === 'test-apk' || lib.name === 'scrcpy') {
@@ -578,7 +604,7 @@ export default {
                         await new Promise(r => setTimeout(r, 3000));
                         await copyFile(path, path.replace('tmp', 'bin'));
                         await invoke("grant_permission", { path: `bin/${lib.name}` });
-                        
+
                     }
                 }
             } catch (e) {
@@ -622,7 +648,7 @@ export default {
             }
 
             if (e.payload.show) {
-                if (this.licenseData.leftdays <= 0 && !this.licenseData.github_starred) {
+                if (!this.is_licensed()) {
                     this.showLicenseDialog();
                 }
             }
@@ -630,7 +656,10 @@ export default {
 
         // 监听代理启动事件
         await this.$listen('agent_started', async (e) => {
-            this.loadLicense();
+            await this.loadLicense();
+            if (!this.is_licensed()) {
+                this.showLicenseDialog();
+            }
         });
 
         this.check_update();
